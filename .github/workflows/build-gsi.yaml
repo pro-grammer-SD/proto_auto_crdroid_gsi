@@ -1,0 +1,31 @@
+name: "Temp crDroid Repo Sync"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  repo_sync:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Setup environment
+        run: |
+          sudo apt update
+          sudo apt install -y curl git python3 jq unzip
+          mkdir -p ~/.bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
+          chmod +x ~/.bin/repo
+          echo "PATH=$HOME/.bin:$PATH" >> $GITHUB_ENV
+
+      - name: Initialize repo
+        run: |
+          MANIFEST_URL="https://github.com/crdroidandroid/android.git"
+          MANIFEST_BRANCH="android-16.0"
+          MANIFEST_FILE="default.xml"
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m "$MANIFEST_FILE"
+
+      - name: Sync repo
+        run: |
+          repo sync -c -j$(nproc) --force-sync --optimized-fetch --no-tags --quiet
