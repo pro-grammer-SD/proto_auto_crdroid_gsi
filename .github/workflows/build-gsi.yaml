@@ -2,8 +2,6 @@ name: "Temp crDroid Repo Sync"
 
 on:
   push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -22,7 +20,7 @@ jobs:
       - name: Initialize repo
         run: |
           MANIFEST_URL="https://github.com/crdroidandroid/android.git"
-          MANIFEST_BRANCH="android-16.0"
+          MANIFEST_BRANCH="16.0"
           MANIFEST_FILE="default.xml"
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m "$MANIFEST_FILE"
 
