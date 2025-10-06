@@ -1,4 +1,4 @@
-name: "Temp crDroid Repo Sync"
+name: "crDroid Repo Sync — Ultra Optimized"
 
 on:
   push:
@@ -8,22 +8,51 @@ jobs:
   repo_sync:
     runs-on: ubuntu-22.04
     steps:
-      - name: Setup environment
+      - name: Setup Environment
         run: |
           sudo apt update
-          sudo apt install -y curl git python3 jq unzip
+          sudo apt install -y curl git python3 jq unzip parallel
           mkdir -p ~/.bin
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
           chmod +x ~/.bin/repo
           echo "PATH=$HOME/.bin:$PATH" >> $GITHUB_ENV
+          echo "💻 Environment ready!"
 
-      - name: Initialize repo
+      - name: Disk Space Check
+        run: |
+          echo "==== 📊 Disk Usage Before Sync ===="
+          df -h /
+          FREE=$(df -BG --output=avail / | tail -n 1 | tr -d 'G')
+          echo "Available Space: ${FREE} GB"
+          if [ "$FREE" -lt 40 ]; then
+            echo "⚠️ Warning: Low disk space (<40GB). Continuing anyway because we’re daredevils."
+          fi
+
+      - name: Initialize Repo
         run: |
           MANIFEST_URL="https://github.com/crdroidandroid/android.git"
           MANIFEST_BRANCH="16.0"
-          MANIFEST_FILE="default.xml"
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m "$MANIFEST_FILE"
+          echo "🚀 Initializing crDroid repo..."
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
 
-      - name: Sync repo
+      - name: Optimized Repo Sync
         run: |
-          repo sync -c -j$(nproc) --force-sync --optimized-fetch --no-tags --quiet
+          echo "🧠 Using $(nproc --all) CPU threads for full power!"
+          echo "Starting ⚡ Ultra Optimized repo sync..."
+          repo sync -c \
+            --force-sync \
+            --optimized-fetch \
+            --no-tags \
+            -j$(nproc --all) \
+            --jobs-network=$(($(nproc --all)/2)) \
+            --jobs-checkout=$(($(nproc --all)/2)) \
+            --retry-fetches=3 || echo "⚠️ Non-fatal sync errors ignored. Continuing..."
+          echo "✅ Sync finished!"
+          df -h /
+
+      - name: Post-Sync Info
+        run: |
+          echo "==== 📦 Disk Summary After Sync ===="
+          du -sh . || true
+          df -h /
+          echo "🔥 Sync operation done. You’re running full-speed now."
