@@ -1,58 +1,97 @@
-name: "crDroid Repo Sync — Ultra Optimized"
+name: Monthly AOSP GSI Build (ARM64-AB)
 
 on:
-  push:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"  # Run every 6 hours
 
 jobs:
-  repo_sync:
+  build:
     runs-on: ubuntu-22.04
-    steps:
-      - name: Setup Environment
-        run: |
-          sudo apt update
-          sudo apt install -y curl git python3 jq unzip parallel
-          mkdir -p ~/.bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
-          chmod +x ~/.bin/repo
-          echo "PATH=$HOME/.bin:$PATH" >> $GITHUB_ENV
-          echo "💻 Environment ready!"
+    timeout-minutes: 360
+    env:
+      BUILD_DIR: aosp
+      TARGET: aosp_arm64_ab-eng
+      BUILD_DONE_FILE: .build_done
 
-      - name: Disk Space Check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stop if already built this month
         run: |
-          echo "==== 📊 Disk Usage Before Sync ===="
-          df -h /
-          FREE=$(df -BG --output=avail / | tail -n 1 | tr -d 'G')
-          echo "Available Space: ${FREE} GB"
-          if [ "$FREE" -lt 40 ]; then
-            echo "⚠️ Warning: Low disk space (<40GB). Continuing anyway because we’re daredevils."
+          MONTH=$(date +%Y-%m)
+          if [ -f $BUILD_DONE_FILE ] && grep -q "$MONTH" $BUILD_DONE_FILE; then
+            echo "✅ Build already completed for $MONTH. Skipping..."
+            exit 0
           fi
 
-      - name: Initialize Repo
+      - name: Setup repo tool
         run: |
-          MANIFEST_URL="https://github.com/crdroidandroid/android.git"
-          MANIFEST_BRANCH="16.0"
-          echo "🚀 Initializing crDroid repo..."
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Optimized Repo Sync
+      - name: Detect latest AOSP branch
+        id: branch
         run: |
-          echo "🧠 Using $(nproc --all) CPU threads for full power!"
-          echo "Starting ⚡ Ultra Optimized repo sync..."
-          repo sync -c \
-            --force-sync \
-            --optimized-fetch \
-            --no-tags \
-            -j$(nproc --all) \
-            --jobs-network=$(($(nproc --all)/2)) \
-            --jobs-checkout=$(($(nproc --all)/2)) \
-            --retry-fetches=3 || echo "⚠️ Non-fatal sync errors ignored. Continuing..."
-          echo "✅ Sync finished!"
-          df -h /
+          LATEST=$(curl -s https://android.googlesource.com/platform/manifest/+refs | \
+          grep -oE 'android-[0-9]+\.[0-9]+\.[0-9]+_r[0-9]+' | sort -V | tail -n 1)
+          echo "branch=$LATEST" >> $GITHUB_OUTPUT
+          echo "📦 Detected latest branch: $LATEST"
 
-      - name: Post-Sync Info
+      - name: Restore branch-aware ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ steps.branch.outputs.branch }}-${{ runner.os }}
+          restore-keys: ccache-${{ steps.branch.outputs.branch }}
+
+      - name: Initialize repo
         run: |
-          echo "==== 📦 Disk Summary After Sync ===="
-          du -sh . || true
-          df -h /
-          echo "🔥 Sync operation done. You’re running full-speed now."
+          mkdir -p $BUILD_DIR
+          cd $BUILD_DIR
+          repo init -u https://android.googlesource.com/platform/manifest -b ${{ steps.branch.outputs.branch }} || true
+
+      - name: Sync AOSP source
+        run: |
+          cd $BUILD_DIR
+          repo sync -c --optimized-fetch --prune --no-tags --force-sync \
+            --retry-fetches=5 --fail-fast -j$(($(nproc)*3)) || true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y openjdk-17-jdk bc bison build-essential curl flex g++-multilib gcc-multilib \
+          git gnupg gperf libxml2-utils lzop zip zlib1g-dev python3 python-is-python3 rsync ccache
+
+      - name: Setup ccache
+        run: |
+          export USE_CCACHE=1
+          ccache -M 10G
+          ccache -z
+          echo "✅ Ccache configured for up to 10 GB"
+
+      - name: Build system image
+        id: build
+        continue-on-error: true
+        run: |
+          cd $BUILD_DIR
+          source build/envsetup.sh
+          lunch $TARGET
+          make -j$(nproc) systemimage
+
+      - name: Mark build complete
+        if: steps.build.outcome == 'success'
+        run: |
+          echo "$(date +%Y-%m)" > $BUILD_DONE_FILE
+          echo "🏁 Build finished successfully for this month."
+
+      - name: Upload artifact
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AOSP-${{ steps.branch.outputs.branch }}-$(date +%b-%Y)
+          path: ${{ env.BUILD_DIR }}/out/target/product/generic_arm64_ab/system.img
+          if-no-files-found: ignore
