@@ -1,97 +1,82 @@
-name: Monthly AOSP GSI Build (ARM64-AB)
+name: AOSP-GSI-Build
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"  # Run every 6 hours
+  push:
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     env:
-      BUILD_DIR: aosp
-      TARGET: aosp_arm64_ab-eng
-      BUILD_DONE_FILE: .build_done
-
+      CCACHE_DIR: /home/runner/work/ccache
+      USE_CCACHE: 1
+      CCACHE_SIZE: 8G
+      BUILD_TARGET: systemimage
+      ROM_NAME: aosp
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Stop if already built this month
+      - name: Setup build environment
         run: |
-          MONTH=$(date +%Y-%m)
-          if [ -f $BUILD_DONE_FILE ] && grep -q "$MONTH" $BUILD_DONE_FILE; then
-            echo "✅ Build already completed for $MONTH. Skipping..."
-            exit 0
-          fi
-
-      - name: Setup repo tool
-        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            gcc-multilib g++-multilib libc6-dev-i386 libncurses5-dev x11proto-core-dev \
+            libx11-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3
           mkdir -p ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
-          chmod +x ~/bin/repo
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Detect latest AOSP branch
-        id: branch
-        run: |
-          LATEST=$(curl -s https://android.googlesource.com/platform/manifest/+refs | \
-          grep -oE 'android-[0-9]+\.[0-9]+\.[0-9]+_r[0-9]+' | sort -V | tail -n 1)
-          echo "branch=$LATEST" >> $GITHUB_OUTPUT
-          echo "📦 Detected latest branch: $LATEST"
-
-      - name: Restore branch-aware ccache
+      - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
-          key: ccache-${{ steps.branch.outputs.branch }}-${{ runner.os }}
-          restore-keys: ccache-${{ steps.branch.outputs.branch }}
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ github.run_id }}
+          restore-keys: ccache-
 
       - name: Initialize repo
         run: |
-          mkdir -p $BUILD_DIR
-          cd $BUILD_DIR
-          repo init -u https://android.googlesource.com/platform/manifest -b ${{ steps.branch.outputs.branch }} || true
+          mkdir -p aosp
+          cd aosp
+          repo init -u https://android.googlesource.com/platform/manifest -b android-15.0.0_r1
+          repo sync -c --no-tags --optimized-fetch --prune -j4
 
-      - name: Sync AOSP source
+      - name: Setup environment
         run: |
-          cd $BUILD_DIR
-          repo sync -c --optimized-fetch --prune --no-tags --force-sync \
-            --retry-fetches=5 --fail-fast -j$(($(nproc)*3)) || true
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y openjdk-17-jdk bc bison build-essential curl flex g++-multilib gcc-multilib \
-          git gnupg gperf libxml2-utils lzop zip zlib1g-dev python3 python-is-python3 rsync ccache
-
-      - name: Setup ccache
-        run: |
-          export USE_CCACHE=1
-          ccache -M 10G
-          ccache -z
-          echo "✅ Ccache configured for up to 10 GB"
-
-      - name: Build system image
-        id: build
-        continue-on-error: true
-        run: |
-          cd $BUILD_DIR
+          cd aosp
           source build/envsetup.sh
-          lunch $TARGET
-          make -j$(nproc) systemimage
+          lunch aosp_arm64-eng
 
-      - name: Mark build complete
-        if: steps.build.outcome == 'success'
+      - name: Build GSI
         run: |
-          echo "$(date +%Y-%m)" > $BUILD_DONE_FILE
-          echo "🏁 Build finished successfully for this month."
+          cd aosp
+          set +e
+          make -j$(nproc) $BUILD_TARGET || true
+          df -h
+          du -sh out || true
 
-      - name: Upload artifact
-        if: steps.build.outcome == 'success'
+      - name: Cleanup on low space
+        run: |
+          USED=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+          if [ "$USED" -gt 90 ]; then
+            echo "Disk nearly full ($USED%), cleaning intermediates..."
+            rm -rf out/target/product/*/obj
+            sudo apt-get clean
+            df -h
+          fi
+
+      - name: Retry build
+        if: failure()
+        run: |
+          cd aosp
+          make -j$(nproc) $BUILD_TARGET
+
+      - name: Upload system image
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AOSP-${{ steps.branch.outputs.branch }}-$(date +%b-%Y)
-          path: ${{ env.BUILD_DIR }}/out/target/product/generic_arm64_ab/system.img
-          if-no-files-found: ignore
+          name: ${{ env.ROM_NAME }}-gsi
+          path: aosp/out/target/product/**/system*.img
